@@ -1,0 +1,29 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Report {
+  id          String   @id @default(uuid())
+  reporterId  String
+  reportedId  String
+  reason      String
+  createdAt   DateTime @default(now())
+  resolved    Boolean  @default(false)
+
+  @@index([reporterId])
+  @@index([createdAt])
+}
+
+model AnalyticsEvent {
+  id        String   @id @default(uuid())
+  type      String
+  duration  Int?
+  createdAt DateTime @default(now())
+
+  @@index([type, createdAt])
+}
