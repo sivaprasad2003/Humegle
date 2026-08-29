@@ -20,6 +20,10 @@ async function forwardToApp() {
     .listenAndForward("http://localhost:3000");
     
   console.log(`Available at: ${listener.url()}`);
+  console.log("Ngrok tunnel is now running. Press Ctrl+C to stop.");
+  
+  // Keep the process alive so the tunnel doesn't close!
+  process.stdin.resume();
 }
 
 forwardToApp();
