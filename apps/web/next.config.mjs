@@ -1,6 +1,11 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  allowedDevOrigins: ['192.168.29.89'],
+  allowedDevOrigins: [
+    '192.168.29.89',
+    'cube-attic-happiest.ngrok-free.dev',
+    '*.ngrok-free.app',
+    '*.ngrok.io',
+  ],
   async rewrites() {
     return [
       {

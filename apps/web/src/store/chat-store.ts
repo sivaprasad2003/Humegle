@@ -1,6 +1,14 @@
 import { create } from 'zustand';
 
-type AppState = 'IDLE' | 'SEARCHING' | 'MATCHED' | 'CONNECTING' | 'CONNECTED' | 'PARTNER_DISCONNECTED' | 'ERROR';
+export type AppState =
+  | 'IDLE'
+  | 'SEARCHING'
+  | 'CONNECTING'
+  | 'CONNECTED'
+  | 'PARTNER_DISCONNECTED'
+  | 'ERROR';
+
+export type ChatMode = 'video' | 'text';
 
 export interface ChatMessage {
   id: string;
@@ -10,11 +18,12 @@ export interface ChatMessage {
 
 interface ChatStore {
   state: AppState;
-  roomId: string | null;
+  chatMode: ChatMode;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   messages: ChatMessage[];
-  setState: (state: AppState) => void;
+  setState: (s: AppState) => void;
+  setChatMode: (m: ChatMode) => void;
   setStreams: (local: MediaStream | null, remote: MediaStream | null) => void;
   addMessage: (msg: ChatMessage) => void;
   reset: () => void;
@@ -22,12 +31,13 @@ interface ChatStore {
 
 export const useChatStore = create<ChatStore>((set) => ({
   state: 'IDLE',
-  roomId: null,
+  chatMode: 'video',
   localStream: null,
   remoteStream: null,
   messages: [],
   setState: (state) => set({ state }),
-  setStreams: (local, remote) => set({ localStream: local, remoteStream: remote }),
-  addMessage: (msg) => set((state) => ({ messages: [...state.messages, msg] })),
-  reset: () => set({ state: 'IDLE', roomId: null, remoteStream: null, messages: [] }),
+  setChatMode: (chatMode) => set({ chatMode }),
+  setStreams: (localStream, remoteStream) => set({ localStream, remoteStream }),
+  addMessage: (msg) => set((s) => ({ messages: [...s.messages, msg] })),
+  reset: () => set({ state: 'IDLE', remoteStream: null, messages: [] }),
 }));

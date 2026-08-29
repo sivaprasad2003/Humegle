@@ -1,165 +1,230 @@
 "use client";
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { useChatStore } from '../store/chat-store';
 import { useWebRTC } from '../hooks/useWebRTC';
 
-// Connect to our backend server through the Next.js proxy (see next.config.mjs)
-// This ensures that when testing on mobile via ngrok, both the UI and WebSockets use the same secure tunnel!
+// Socket connects through the Next.js proxy (next.config.mjs) so ngrok HTTPS tunnels work on mobile
 const socket = io({ autoConnect: false, path: '/socket.io' });
 
 export default function Home() {
-  const { state, setState, localStream, setStreams, messages, addMessage, reset } = useChatStore();
+  const {
+    state, setState,
+    chatMode, setChatMode,
+    localStream, remoteStream, setStreams,
+    messages, addMessage, reset,
+  } = useChatStore();
+
   const [gender, setGender] = useState('MALE');
   const [interest, setInterest] = useState('ANY');
-  const [chatMode, setChatMode] = useState<'video' | 'text'>('video');
-  const [inputText, setInputText] = useState('');
+  const [chatInput, setChatInput] = useState('');
+  const [onlineUsers, setOnlineUsers] = useState(0);
   const [cameraError, setCameraError] = useState('');
-  const [onlineCount, setOnlineCount] = useState<number>(0);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [isCameraLoading, setIsCameraLoading] = useState(false);
 
-  // Initialize WebRTC logic
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
   const { endConnection } = useWebRTC(socket);
 
-  // Auto-scroll chat
+  // ─── Sync video elements with streams ──────────────────────────────────────
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream]);
+
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
+
+  // ─── Socket listeners ───────────────────────────────────────────────────────
+  useEffect(() => {
+    socket.connect();
+
+    const onOnlineUsers = (count: number) => setOnlineUsers(count);
+    const onChatMessage = (data: { text: string }) => {
+      addMessage({ id: Date.now().toString(), sender: 'partner', text: data.text });
+    };
+    const onPartnerLeft = () => {
+      addMessage({ id: Date.now().toString(), sender: 'system', text: '— Partner disconnected —' });
+    };
+
+    socket.on('online_users', onOnlineUsers);
+    socket.on('chat_message', onChatMessage);
+    socket.on('partner_left', onPartnerLeft);
+
+    return () => {
+      socket.off('online_users', onOnlineUsers);
+      socket.off('chat_message', onChatMessage);
+      socket.off('partner_left', onPartnerLeft);
+      socket.disconnect();
+    };
+  }, [addMessage]);
+
+  // ─── Auto-scroll chat ───────────────────────────────────────────────────────
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Setup socket listeners for text chat and online count
-  useEffect(() => {
-    const handleIncomingMessage = (data: { message?: string; text?: string }) => {
-      const text = data.text || data.message || '';
-      addMessage({ id: Date.now().toString(), sender: 'partner', text });
-    };
-
-    const handlePartnerLeft = () => {
-      addMessage({ id: Date.now().toString(), sender: 'system', text: '--- Partner has disconnected ---' });
-    };
-
-    const handleOnlineCount = (data: { count: number }) => {
-      setOnlineCount(data.count);
-    };
-
-    socket.on('chat_message', handleIncomingMessage);
-    socket.on('partner_left', handlePartnerLeft);
-    socket.on('online_count', handleOnlineCount);
-
-    return () => {
-      socket.off('chat_message', handleIncomingMessage);
-      socket.off('partner_left', handlePartnerLeft);
-      socket.off('online_count', handleOnlineCount);
-    };
-  }, [addMessage]);
-
-  // Clear messages when searching again
-  useEffect(() => {
-    if (state === 'SEARCHING') {
-      setCameraError('');
+  // ─── Camera / Media ─────────────────────────────────────────────────────────
+  const requestCamera = useCallback(async (): Promise<boolean> => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError('Camera not supported. Use HTTPS or switch to Text mode.');
+      return false;
     }
-  }, [state]);
+    setIsCameraLoading(true);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setStreams(stream, null);
+      setCameraError('');
+      return true;
+    } catch (err: any) {
+      const msg = err.name === 'NotAllowedError'
+        ? 'Camera permission denied. Switch to Text Only mode or allow camera access.'
+        : err.message || 'Camera unavailable.';
+      setCameraError(msg);
+      return false;
+    } finally {
+      setIsCameraLoading(false);
+    }
+  }, [setStreams]);
 
+  const stopCamera = useCallback(() => {
+    localStream?.getTracks().forEach(t => t.stop());
+    setStreams(null, null);
+  }, [localStream, setStreams]);
+
+  // Stop camera when switching to text mode
+  useEffect(() => {
+    if (chatMode === 'text') stopCamera();
+  }, [chatMode]); // eslint-disable-line
+
+  // ─── Handlers ───────────────────────────────────────────────────────────────
   const handleStart = async () => {
     setCameraError('');
-    
-    // Request camera ONLY if video mode is selected
     if (chatMode === 'video') {
-      try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw new Error('Your browser does not support video chat or you are not using HTTPS / localhost.');
-        }
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-        setStreams(stream, null);
-      } catch (err: any) {
-        console.error("Camera access denied", err);
-        setCameraError(err.message || 'Camera access denied. Try Text Chat instead.');
-        return; // Don't proceed if camera fails and they want video
+      if (!localStream) {
+        const ok = await requestCamera();
+        if (!ok) return;
       }
-    } else {
-      // For text chat, ensure streams are null
-      setStreams(null, null);
     }
-
-    socket.connect();
+    reset();
     setState('SEARCHING');
-    socket.emit('join_queue', { gender, interest }, (response: any) => {
-      console.log('Server response:', response);
-    });
+    socket.emit('join_queue', { gender, interest, mode: chatMode });
   };
 
   const handleSkip = () => {
     endConnection();
     socket.emit('skip');
-    reset(); // Clear messages
+    reset();
     setState('SEARCHING');
-    socket.emit('join_queue', { gender, interest });
+    socket.emit('join_queue', { gender, interest, mode: chatMode });
+  };
+
+  const handleStop = () => {
+    endConnection();
+    socket.emit('skip');
+    stopCamera();
+    reset();
+    setState('IDLE');
   };
 
   const sendMessage = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputText.trim()) return;
-    
-    // Emit to partner (support both text and message keys for compatibility)
-    socket.emit('chat_message', { message: inputText, text: inputText });
-    // Add to local UI
-    addMessage({ id: Date.now().toString(), sender: 'me', text: inputText });
-    setInputText('');
+    const text = chatInput.trim();
+    if (!text) return;
+    socket.emit('chat_message', { text });
+    addMessage({ id: Date.now().toString(), sender: 'me', text });
+    setChatInput('');
   };
 
-  // Connect socket immediately so we get online count even before searching
-  useEffect(() => {
-    socket.connect();
-    return () => { socket.disconnect(); };
-  }, []);
-
+  // ─── Render ─────────────────────────────────────────────────────────────────
   return (
-    <main className="min-h-screen bg-[#0a0a0a] text-gray-100 flex flex-col items-center justify-center p-4 md:p-8 font-sans selection:bg-indigo-500/30">
-      
-      {/* Dynamic Background Glows */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-[-20%] left-[-10%] w-[50%] h-[50%] bg-indigo-600/20 blur-[120px] rounded-full mix-blend-screen" />
-        <div className="absolute bottom-[-20%] right-[-10%] w-[50%] h-[50%] bg-blue-600/20 blur-[120px] rounded-full mix-blend-screen" />
+    <main className="min-h-screen bg-[#0d0d0f] text-gray-100 font-sans flex flex-col" style={{ fontFamily: "'Inter', sans-serif" }}>
+
+      {/* Google Fonts */}
+      <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');`}</style>
+
+      {/* Background glows */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none z-0">
+        <div className="absolute -top-40 -left-40 w-96 h-96 bg-violet-600/20 rounded-full blur-[120px]" />
+        <div className="absolute -bottom-40 -right-40 w-96 h-96 bg-blue-600/20 rounded-full blur-[120px]" />
       </div>
 
-      <div className="z-10 w-full max-w-5xl flex flex-col items-center relative">
-        {onlineCount > 0 && (
-          <div className="absolute top-0 right-0 flex items-center gap-2 bg-white/5 border border-white/10 px-4 py-2 rounded-full shadow-lg backdrop-blur-md">
-            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse shadow-[0_0_10px_#22c55e]"></div>
-            <span className="text-sm font-medium text-gray-300">{onlineCount} Online</span>
-          </div>
-        )}
-        
-        <h1 className="text-5xl font-extrabold mb-10 tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-cyan-400 drop-shadow-sm mt-4">
-          Humegle<span className="text-white">Chat</span>
-        </h1>
+      {/* Header */}
+      <header className="relative z-10 flex items-center justify-between px-6 py-4 border-b border-white/5 backdrop-blur-md">
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-violet-500 to-blue-500 flex items-center justify-center font-black text-sm">H</div>
+          <span className="text-xl font-bold tracking-tight">Humegle</span>
+        </div>
 
+        {/* Online pill */}
+        <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 px-4 py-1.5 rounded-full">
+          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <span className="text-sm font-semibold text-emerald-300">{onlineUsers} Online</span>
+        </div>
+      </header>
+
+      {/* Body */}
+      <div className="relative z-10 flex-1 flex flex-col items-center justify-center p-4">
+
+        {/* ── IDLE SCREEN ── */}
         {state === 'IDLE' && (
-          <div className="bg-white/5 backdrop-blur-xl border border-white/10 p-8 rounded-3xl shadow-2xl max-w-md w-full relative overflow-hidden transition-all duration-300 hover:shadow-indigo-500/10 hover:border-white/20">
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-indigo-500 to-cyan-500" />
-            
-            <div className="space-y-6">
+          <div className="w-full max-w-sm">
+            <div className="text-center mb-8">
+              <h1 className="text-4xl font-extrabold mb-2 bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent">
+                Talk to Strangers
+              </h1>
+              <p className="text-gray-500 text-sm">Instantly match with someone new</p>
+            </div>
+
+            <div className="bg-white/5 border border-white/10 rounded-3xl p-6 space-y-5 shadow-2xl backdrop-blur-xl">
+              {/* Accent line */}
+              <div className="h-px w-full bg-gradient-to-r from-transparent via-violet-500/50 to-transparent" />
+
+              {/* Mode toggle */}
               <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">I am:</label>
-                <div className="relative">
-                  <select 
-                    className="w-full appearance-none p-4 bg-black/40 border border-white/10 rounded-xl text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all cursor-pointer"
-                    value={gender} 
-                    onChange={(e) => setGender(e.target.value)}
-                  >
-                    <option value="MALE">Male</option>
-                    <option value="FEMALE">Female</option>
-                    <option value="OTHER">Other</option>
-                  </select>
+                <label className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-3 block">Chat Mode</label>
+                <div className="grid grid-cols-2 gap-2 bg-black/30 p-1 rounded-2xl">
+                  {(['video', 'text'] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setChatMode(m)}
+                      className={`py-3 rounded-xl text-sm font-bold transition-all duration-200 ${
+                        chatMode === m
+                          ? 'bg-gradient-to-r from-violet-600 to-blue-600 text-white shadow-lg shadow-violet-500/25'
+                          : 'text-gray-500 hover:text-gray-300'
+                      }`}
+                    >
+                      {m === 'video' ? '🎥 Video' : '💬 Text Only'}
+                    </button>
+                  ))}
                 </div>
               </div>
 
+              {/* I am */}
               <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">Interested in:</label>
-                <select 
-                  className="w-full appearance-none p-4 bg-black/40 border border-white/10 rounded-xl text-white outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all cursor-pointer"
-                  value={interest} 
-                  onChange={(e) => setInterest(e.target.value)}
+                <label className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 block">I am</label>
+                <select
+                  value={gender} onChange={e => setGender(e.target.value)}
+                  className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white outline-none focus:border-violet-500 transition-colors cursor-pointer appearance-none"
+                >
+                  <option value="MALE">Male</option>
+                  <option value="FEMALE">Female</option>
+                  <option value="OTHER">Other</option>
+                </select>
+              </div>
+
+              {/* Interested in */}
+              <div>
+                <label className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 block">Interested in</label>
+                <select
+                  value={interest} onChange={e => setInterest(e.target.value)}
+                  className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-3 text-white outline-none focus:border-violet-500 transition-colors cursor-pointer appearance-none"
                 >
                   <option value="ANY">Anyone</option>
                   <option value="MALE">Male</option>
@@ -167,167 +232,162 @@ export default function Home() {
                 </select>
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-400 mb-2">Chat Mode:</label>
-                <div className="flex bg-black/40 border border-white/10 rounded-xl p-1">
-                  <button
-                    onClick={() => setChatMode('video')}
-                    className={`flex-1 py-3 rounded-lg text-sm font-semibold transition-all ${chatMode === 'video' ? 'bg-indigo-600 shadow-lg text-white' : 'text-gray-400 hover:text-white'}`}
-                  >
-                    🎥 Video
-                  </button>
-                  <button
-                    onClick={() => setChatMode('text')}
-                    className={`flex-1 py-3 rounded-lg text-sm font-semibold transition-all ${chatMode === 'text' ? 'bg-indigo-600 shadow-lg text-white' : 'text-gray-400 hover:text-white'}`}
-                  >
-                    💬 Text Only
-                  </button>
-                </div>
-              </div>
-
+              {/* Camera error */}
               {cameraError && (
-                <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm">
+                <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-3 text-sm text-red-400">
                   {cameraError}
                 </div>
               )}
 
-              <button 
+              {/* Start button */}
+              <button
                 onClick={handleStart}
-                className="w-full relative group overflow-hidden bg-white text-black font-bold py-4 rounded-xl mt-4 hover:scale-[1.02] active:scale-[0.98] transition-transform"
+                disabled={isCameraLoading}
+                className="w-full py-4 rounded-xl font-bold text-white bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-500 hover:to-blue-500 active:scale-95 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                <span className="relative z-10">Find a Match</span>
-                <div className="absolute inset-0 h-full w-full bg-gradient-to-r from-indigo-200 to-cyan-200 opacity-0 group-hover:opacity-100 transition-opacity" />
+                {isCameraLoading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Starting Camera...
+                  </span>
+                ) : 'Find a Match'}
               </button>
             </div>
           </div>
         )}
 
+        {/* ── CHAT SCREEN ── */}
         {state !== 'IDLE' && (
-          <div className="w-full max-w-6xl flex flex-col lg:flex-row gap-6 h-[80vh]">
-            
-            {/* Left Side: Video (Only visible if video mode) */}
+          <div className="w-full max-w-6xl h-[calc(100vh-80px)] flex flex-col lg:flex-row gap-4">
+
+            {/* ── Video Panel (video mode only) ── */}
             {chatMode === 'video' && (
-              <div className="flex-1 flex flex-col gap-4">
-                {/* Remote Video */}
-                <div className="flex-1 bg-black/50 backdrop-blur-sm border border-white/10 rounded-3xl overflow-hidden relative group">
-                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <span className="text-gray-400 font-medium tracking-wide">
-                      {state === 'SEARCHING' ? (
-                         <span className="flex items-center gap-2">
-                           <span className="animate-pulse">●</span> Looking for someone...
-                         </span>
-                      ) : 
-                       state === 'CONNECTING' ? 'Connecting...' : 
-                       state === 'PARTNER_DISCONNECTED' ? 'Partner left' : ''}
-                    </span>
-                  </div>
-                  <video 
-                    id="remoteVideo"
-                    autoPlay 
-                    playsInline 
-                    className="w-full h-full object-cover relative z-10"
-                    ref={(video) => {
-                      if (video && useChatStore.getState().remoteStream) {
-                        video.srcObject = useChatStore.getState().remoteStream;
-                      }
-                    }}
+              <div className="flex-1 flex flex-col gap-3 min-h-0">
+                {/* Remote video */}
+                <div className="flex-1 bg-black rounded-2xl overflow-hidden relative border border-white/10 flex items-center justify-center min-h-0">
+                  <video
+                    ref={remoteVideoRef}
+                    autoPlay playsInline
+                    className="w-full h-full object-cover"
                   />
-                  {/* Decorative corner accents */}
-                  <div className="absolute top-4 left-4 w-12 h-12 border-t-2 border-l-2 border-indigo-500/50 rounded-tl-xl opacity-0 group-hover:opacity-100 transition-opacity z-20" />
-                  <div className="absolute bottom-4 right-4 w-12 h-12 border-b-2 border-r-2 border-cyan-500/50 rounded-br-xl opacity-0 group-hover:opacity-100 transition-opacity z-20" />
+                  {/* Overlay for non-connected states */}
+                  {state !== 'CONNECTED' && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 gap-3">
+                      {(state === 'SEARCHING' || state === 'CONNECTING') && (
+                        <div className="w-10 h-10 border-3 border-violet-400/30 border-t-violet-400 rounded-full animate-spin" />
+                      )}
+                      <p className="text-lg font-semibold text-gray-300 animate-pulse">
+                        {state === 'SEARCHING' ? 'Finding a match...'
+                          : state === 'CONNECTING' ? 'Connecting...'
+                          : state === 'PARTNER_DISCONNECTED' ? 'Partner left'
+                          : 'Connection error'}
+                      </p>
+                    </div>
+                  )}
+                  {/* Local PiP */}
+                  <div className="absolute bottom-3 right-3 w-28 md:w-36 aspect-video bg-gray-900 rounded-xl overflow-hidden border-2 border-white/20 shadow-xl">
+                    <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
+                    <span className="absolute bottom-1 left-2 text-[10px] text-white/60 font-medium">You</span>
+                  </div>
                 </div>
 
-                {/* Local Video & Controls */}
-                <div className="h-48 md:h-64 flex gap-4">
-                  <div className="flex-1 bg-black/50 backdrop-blur-sm border border-white/10 rounded-3xl overflow-hidden relative">
-                    <span className="absolute bottom-3 left-4 bg-black/60 px-3 py-1 rounded-full text-xs font-medium text-gray-300 z-20 backdrop-blur-md">You</span>
-                    <video 
-                      id="localVideo"
-                      autoPlay 
-                      playsInline 
-                      muted 
-                      className="w-full h-full object-cover transform scale-x-[-1] relative z-10"
-                      ref={(video) => {
-                        if (video && localStream) video.srcObject = localStream;
-                      }}
-                    />
-                  </div>
-                  
-                  <button 
+                {/* Controls */}
+                <div className="flex gap-3 shrink-0">
+                  <button
                     onClick={handleSkip}
-                    className="w-32 bg-red-500/20 hover:bg-red-500/40 border border-red-500/50 text-red-100 font-bold rounded-3xl transition-all hover:shadow-[0_0_20px_rgba(239,68,68,0.3)] flex flex-col items-center justify-center gap-2"
+                    className="flex-1 py-3 rounded-xl font-bold text-sm bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-all"
                   >
-                    <span className="text-3xl">⏭</span>
-                    <span>Skip</span>
+                    ⏭ Next Person
+                  </button>
+                  <button
+                    onClick={handleStop}
+                    className="px-6 py-3 rounded-xl font-bold text-sm bg-red-500/20 hover:bg-red-500/30 border border-red-500/40 text-red-300 hover:text-red-200 transition-all"
+                  >
+                    ✕ Stop
                   </button>
                 </div>
               </div>
             )}
 
-            {/* Right Side / Full Width: Text Chat UI */}
-            <div className={`${chatMode === 'video' ? 'w-full lg:w-[400px]' : 'w-full max-w-4xl mx-auto'} flex flex-col bg-white/5 backdrop-blur-xl border border-white/10 rounded-3xl overflow-hidden shadow-2xl`}>
-              <div className="p-4 border-b border-white/10 bg-white/5 flex items-center justify-between">
-                <h3 className="font-semibold text-white/90">Live Chat</h3>
+            {/* ── Chat Panel ── */}
+            <div className={`${chatMode === 'video' ? 'w-full lg:w-[360px]' : 'w-full max-w-2xl mx-auto'} flex flex-col min-h-0 bg-white/5 border border-white/10 rounded-2xl overflow-hidden backdrop-blur-xl`}>
+
+              {/* Chat header */}
+              <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${state === 'CONNECTED' ? 'bg-emerald-400 animate-pulse' : 'bg-yellow-400 animate-pulse'}`} />
+                  <span className="font-semibold text-sm">
+                    {state === 'CONNECTED' ? 'Live Chat' : state === 'SEARCHING' ? 'Searching...' : 'Connecting...'}
+                  </span>
+                </div>
                 {chatMode === 'text' && (
-                  <button 
-                    onClick={handleSkip}
-                    className="px-4 py-2 bg-red-500/20 hover:bg-red-500/40 border border-red-500/50 text-red-100 text-sm font-bold rounded-full transition-all"
-                  >
-                    Skip to Next
-                  </button>
+                  <div className="flex gap-2">
+                    <button onClick={handleSkip} className="px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 text-gray-400 hover:text-white transition-all">
+                      Next
+                    </button>
+                    <button onClick={handleStop} className="px-3 py-1.5 rounded-lg text-xs font-bold bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 transition-all">
+                      Stop
+                    </button>
+                  </div>
                 )}
               </div>
-              
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {state === 'SEARCHING' && (
-                  <div className="h-full flex flex-col items-center justify-center text-gray-500 space-y-3">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div>
-                    <p className="animate-pulse">Looking for a match...</p>
-                  </div>
-                )}
-                {state === 'CONNECTING' && (
-                  <div className="h-full flex flex-col items-center justify-center text-gray-500 space-y-3">
-                    <p className="animate-pulse">Connecting...</p>
-                  </div>
-                )}
-                {state === 'CONNECTED' && messages.length === 0 && (
-                  <div className="h-full flex flex-col items-center justify-center text-gray-500 space-y-2">
-                    <span className="text-3xl">👋</span>
-                    <p>Say hello to your match!</p>
-                  </div>
-                )}
-                
-                {messages.map((msg) => (
-                  <div key={msg.id} className={`flex ${msg.sender === 'me' ? 'justify-end' : 'justify-start'}`}>
-                    {msg.sender === 'system' ? (
-                      <div className="w-full text-center text-xs text-gray-500 my-4 border-t border-b border-white/5 py-2">
+
+              {/* Text-only search state */}
+              {chatMode === 'text' && state === 'SEARCHING' && (
+                <div className="flex-1 flex flex-col items-center justify-center gap-4 text-gray-500">
+                  <div className="w-10 h-10 border-2 border-violet-400/30 border-t-violet-400 rounded-full animate-spin" />
+                  <p className="animate-pulse text-sm">Looking for a match...</p>
+                </div>
+              )}
+
+              {/* Messages */}
+              {(state !== 'SEARCHING' || chatMode === 'video') && (
+                <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-2 min-h-0">
+                  {messages.length === 0 && state === 'CONNECTED' && (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-2 text-gray-600">
+                      <span className="text-3xl">👋</span>
+                      <p className="text-sm">Say hi!</p>
+                    </div>
+                  )}
+                  {messages.map((msg) =>
+                    msg.sender === 'system' ? (
+                      <div key={msg.id} className="text-center text-xs text-gray-600 py-3 border-y border-white/5">
                         {msg.text}
                       </div>
                     ) : (
-                      <div className={`max-w-[80%] p-3 rounded-2xl ${msg.sender === 'me' ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-gray-800 text-gray-100 rounded-bl-sm border border-white/5'}`}>
-                        {msg.text}
+                      <div key={msg.id} className={`flex ${msg.sender === 'me' ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`max-w-[78%] px-4 py-2.5 rounded-2xl text-sm ${
+                          msg.sender === 'me'
+                            ? 'bg-gradient-to-r from-violet-600 to-blue-600 text-white rounded-br-sm'
+                            : 'bg-white/10 text-gray-100 rounded-bl-sm border border-white/10'
+                        }`}>
+                          {msg.text}
+                        </div>
                       </div>
-                    )}
-                  </div>
-                ))}
-                <div ref={messagesEndRef} />
-              </div>
+                    )
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+              )}
 
-              <form onSubmit={sendMessage} className="p-4 bg-black/20 border-t border-white/10 flex gap-2">
+              {/* Input */}
+              <form onSubmit={sendMessage} className="p-3 border-t border-white/10 flex gap-2 shrink-0">
                 <input
                   type="text"
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  placeholder={state === 'CONNECTED' ? "Type a message..." : "Waiting for match..."}
-                  className="flex-1 bg-white/5 border border-white/10 rounded-full px-5 py-3 text-white outline-none focus:border-indigo-500 focus:bg-white/10 transition-all placeholder-gray-500"
+                  value={chatInput}
+                  onChange={e => setChatInput(e.target.value)}
+                  placeholder={state === 'CONNECTED' ? 'Type a message...' : 'Waiting for match...'}
                   disabled={state !== 'CONNECTED'}
+                  className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 outline-none focus:border-violet-500/60 disabled:opacity-40 transition-colors"
                 />
                 <button
                   type="submit"
-                  disabled={!inputText.trim() || state !== 'CONNECTED'}
-                  className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-full p-3 w-12 h-12 flex items-center justify-center transition-all shadow-lg hover:shadow-indigo-500/25"
+                  disabled={!chatInput.trim() || state !== 'CONNECTED'}
+                  className="w-10 h-10 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:from-violet-500 hover:to-blue-500 transition-all shrink-0"
                 >
-                  <svg className="w-5 h-5 ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                  <svg className="w-4 h-4 rotate-45" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                  </svg>
                 </button>
               </form>
             </div>

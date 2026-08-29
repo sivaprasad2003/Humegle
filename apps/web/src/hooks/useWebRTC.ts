@@ -1,97 +1,121 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { Socket } from 'socket.io-client';
 import { useChatStore } from '../store/chat-store';
 
-const ICE_SERVERS = {
+const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' }
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
   ],
 };
 
 export const useWebRTC = (socket: Socket) => {
-  const peerConnection = useRef<RTCPeerConnection | null>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
   const { localStream, setStreams, setState } = useChatStore();
 
-  const initWebRTC = async (isInitiator: boolean) => {
-    peerConnection.current = new RTCPeerConnection(ICE_SERVERS);
+  const closePeer = useCallback(() => {
+    if (peerRef.current) {
+      peerRef.current.ontrack = null;
+      peerRef.current.onicecandidate = null;
+      peerRef.current.onconnectionstatechange = null;
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+    // Clear the remote stream
+    useChatStore.getState().setStreams(useChatStore.getState().localStream, null);
+  }, []);
 
-    if (localStream) {
-      localStream.getTracks().forEach((track) => {
-        peerConnection.current?.addTrack(track, localStream);
-      });
+  const initWebRTC = useCallback(async (isInitiator: boolean, stream: MediaStream | null) => {
+    closePeer();
+
+    const pc = new RTCPeerConnection(ICE_SERVERS);
+    peerRef.current = pc;
+
+    // Add local tracks to the peer connection
+    if (stream) {
+      stream.getTracks().forEach((track) => pc.addTrack(track, stream));
     }
 
-    peerConnection.current.ontrack = (event) => {
-      if (event.streams && event.streams[0]) {
-        setStreams(localStream, event.streams[0]);
-        setState('CONNECTED');
+    // When we receive the partner's video/audio
+    pc.ontrack = (event) => {
+      if (event.streams?.[0]) {
+        useChatStore.getState().setStreams(useChatStore.getState().localStream, event.streams[0]);
+        useChatStore.getState().setState('CONNECTED');
       }
     };
 
-    peerConnection.current.onicecandidate = (event) => {
+    // Send ICE candidates to the partner
+    pc.onicecandidate = (event) => {
       if (event.candidate) {
         socket.emit('webrtc_signal', { type: 'ice-candidate', payload: event.candidate });
       }
     };
 
-    peerConnection.current.onconnectionstatechange = () => {
-      if (peerConnection.current?.connectionState === 'failed') {
-        setState('ERROR');
+    pc.onconnectionstatechange = () => {
+      const s = pc.connectionState;
+      if (s === 'connected') {
+        useChatStore.getState().setState('CONNECTED');
+      } else if (s === 'failed' || s === 'disconnected') {
+        useChatStore.getState().setState('ERROR');
       }
     };
 
     if (isInitiator) {
-      const offer = await peerConnection.current.createOffer();
-      await peerConnection.current.setLocalDescription(offer);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
       socket.emit('webrtc_signal', { type: 'offer', payload: offer });
     }
-  };
+  }, [socket, closePeer]);
 
   useEffect(() => {
-    socket.on('matched', async ({ role }) => {
-      // If we don't have a local stream, we are in Text Only mode.
-      // We don't need WebRTC, so we just instantly connect!
-      if (!localStream) {
+    const onMatched = async ({ role, mode }: { role: string; mode: string }) => {
+      // Text-only mode: skip WebRTC entirely
+      if (mode === 'text') {
         setState('CONNECTED');
         return;
       }
-      
+
       setState('CONNECTING');
-      await initWebRTC(role === 'initiator');
-    });
+      // Get the most current local stream from the store at match time
+      const currentStream = useChatStore.getState().localStream;
+      await initWebRTC(role === 'initiator', currentStream);
+    };
 
-    socket.on('webrtc_signal', async ({ type, payload }) => {
-      if (!peerConnection.current) return;
+    const onSignal = async ({ type, payload }: { type: string; payload: any }) => {
+      const pc = peerRef.current;
+      if (!pc) return;
 
-      if (type === 'offer') {
-        await peerConnection.current.setRemoteDescription(new RTCSessionDescription(payload));
-        const answer = await peerConnection.current.createAnswer();
-        await peerConnection.current.setLocalDescription(answer);
-        socket.emit('webrtc_signal', { type: 'answer', payload: answer });
-      } else if (type === 'answer') {
-        await peerConnection.current.setRemoteDescription(new RTCSessionDescription(payload));
-      } else if (type === 'ice-candidate') {
-        await peerConnection.current.addIceCandidate(new RTCIceCandidate(payload));
+      try {
+        if (type === 'offer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          socket.emit('webrtc_signal', { type: 'answer', payload: answer });
+        } else if (type === 'answer') {
+          await pc.setRemoteDescription(new RTCSessionDescription(payload));
+        } else if (type === 'ice-candidate') {
+          await pc.addIceCandidate(new RTCIceCandidate(payload));
+        }
+      } catch (err) {
+        console.error('[WebRTC] Signal error:', err);
       }
-    });
+    };
 
-    socket.on('partner_left', () => {
-      peerConnection.current?.close();
-      peerConnection.current = null;
+    const onPartnerLeft = () => {
+      closePeer();
       setState('PARTNER_DISCONNECTED');
-    });
+    };
+
+    socket.on('matched', onMatched);
+    socket.on('webrtc_signal', onSignal);
+    socket.on('partner_left', onPartnerLeft);
 
     return () => {
-      socket.off('matched');
-      socket.off('webrtc_signal');
-      socket.off('partner_left');
+      socket.off('matched', onMatched);
+      socket.off('webrtc_signal', onSignal);
+      socket.off('partner_left', onPartnerLeft);
     };
-  }, [socket, localStream]);
+  }, [socket, initWebRTC, closePeer, setState]);
 
-  const endConnection = () => {
-    peerConnection.current?.close();
-    peerConnection.current = null;
-  };
-
-  return { endConnection };
+  return { endConnection: closePeer };
 };
