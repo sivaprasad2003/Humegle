@@ -5,21 +5,15 @@ import { io } from 'socket.io-client';
 import { useChatStore } from '../store/chat-store';
 import { useWebRTC } from '../hooks/useWebRTC';
 
-// Connect to our backend server (dynamically use current hostname for network testing)
-const socketUrl = typeof window !== 'undefined' ? `http://${window.location.hostname}:8080` : 'http://localhost:8080';
-const socket = io(socketUrl, { autoConnect: false });
-
-type ChatMessage = {
-  sender: 'you' | 'partner';
-  text: string;
-};
+// Connect to our backend server through the Next.js proxy (see next.config.mjs)
+// This ensures that when testing on mobile via ngrok, both the UI and WebSockets use the same secure tunnel!
+const socket = io({ autoConnect: false, path: '/socket.io' });
 
 export default function Home() {
-  const { state, setState, localStream, setStreams } = useChatStore();
+  const { state, setState, localStream, setStreams, messages, addMessage, reset } = useChatStore();
   const [gender, setGender] = useState('MALE');
   const [interest, setInterest] = useState('ANY');
   const [chatMode, setChatMode] = useState<'video' | 'text'>('video');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputText, setInputText] = useState('');
   const [cameraError, setCameraError] = useState('');
   const [onlineCount, setOnlineCount] = useState<number>(0);
@@ -35,12 +29,13 @@ export default function Home() {
 
   // Setup socket listeners for text chat and online count
   useEffect(() => {
-    const handleIncomingMessage = (data: { message: string }) => {
-      setMessages((prev) => [...prev, { sender: 'partner', text: data.message }]);
+    const handleIncomingMessage = (data: { message?: string; text?: string }) => {
+      const text = data.text || data.message || '';
+      addMessage({ id: Date.now().toString(), sender: 'partner', text });
     };
 
     const handlePartnerLeft = () => {
-      setMessages((prev) => [...prev, { sender: 'partner', text: '--- Partner has disconnected ---' }]);
+      addMessage({ id: Date.now().toString(), sender: 'system', text: '--- Partner has disconnected ---' });
     };
 
     const handleOnlineCount = (data: { count: number }) => {
@@ -56,12 +51,11 @@ export default function Home() {
       socket.off('partner_left', handlePartnerLeft);
       socket.off('online_count', handleOnlineCount);
     };
-  }, []);
+  }, [addMessage]);
 
   // Clear messages when searching again
   useEffect(() => {
     if (state === 'SEARCHING') {
-      setMessages([]);
       setCameraError('');
     }
   }, [state]);
@@ -97,6 +91,7 @@ export default function Home() {
   const handleSkip = () => {
     endConnection();
     socket.emit('skip');
+    reset(); // Clear messages
     setState('SEARCHING');
     socket.emit('join_queue', { gender, interest });
   };
@@ -105,10 +100,10 @@ export default function Home() {
     e.preventDefault();
     if (!inputText.trim()) return;
     
-    // Emit to partner
-    socket.emit('chat_message', { message: inputText });
+    // Emit to partner (support both text and message keys for compatibility)
+    socket.emit('chat_message', { message: inputText, text: inputText });
     // Add to local UI
-    setMessages((prev) => [...prev, { sender: 'you', text: inputText }]);
+    addMessage({ id: Date.now().toString(), sender: 'me', text: inputText });
     setInputText('');
   };
 
@@ -302,14 +297,14 @@ export default function Home() {
                   </div>
                 )}
                 
-                {messages.map((msg, i) => (
-                  <div key={i} className={`flex ${msg.sender === 'you' ? 'justify-end' : 'justify-start'}`}>
-                    {msg.sender === 'partner' && msg.text.includes('--- Partner has disconnected ---') ? (
+                {messages.map((msg) => (
+                  <div key={msg.id} className={`flex ${msg.sender === 'me' ? 'justify-end' : 'justify-start'}`}>
+                    {msg.sender === 'system' ? (
                       <div className="w-full text-center text-xs text-gray-500 my-4 border-t border-b border-white/5 py-2">
                         {msg.text}
                       </div>
                     ) : (
-                      <div className={`max-w-[80%] p-3 rounded-2xl ${msg.sender === 'you' ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-gray-800 text-gray-100 rounded-bl-sm border border-white/5'}`}>
+                      <div className={`max-w-[80%] p-3 rounded-2xl ${msg.sender === 'me' ? 'bg-indigo-600 text-white rounded-br-sm' : 'bg-gray-800 text-gray-100 rounded-bl-sm border border-white/5'}`}>
                         {msg.text}
                       </div>
                     )}
