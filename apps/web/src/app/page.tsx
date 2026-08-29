@@ -8,6 +8,32 @@ import { useWebRTC } from '../hooks/useWebRTC';
 // Socket connects through the Next.js proxy (next.config.mjs) so ngrok HTTPS tunnels work on mobile
 const socket = io({ autoConnect: false, path: '/socket.io' });
 
+// Common languages list
+const LANGUAGES = [
+  { code: '', label: 'Any Language' },
+  { code: 'en', label: 'English' },
+  { code: 'hi', label: 'Hindi' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'fr', label: 'French' },
+  { code: 'de', label: 'German' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+  { code: 'zh', label: 'Chinese' },
+  { code: 'ar', label: 'Arabic' },
+  { code: 'tr', label: 'Turkish' },
+  { code: 'it', label: 'Italian' },
+  { code: 'pl', label: 'Polish' },
+  { code: 'nl', label: 'Dutch' },
+  { code: 'id', label: 'Indonesian' },
+  { code: 'th', label: 'Thai' },
+  { code: 'vi', label: 'Vietnamese' },
+  { code: 'ta', label: 'Tamil' },
+  { code: 'te', label: 'Telugu' },
+  { code: 'bn', label: 'Bengali' },
+];
+
 export default function Home() {
   const {
     state, setState,
@@ -22,6 +48,13 @@ export default function Home() {
   const [onlineUsers, setOnlineUsers] = useState(0);
   const [cameraError, setCameraError] = useState('');
   const [isCameraLoading, setIsCameraLoading] = useState(false);
+
+  // In-chat filter state (changeable any time, applied on next match)
+  const [showFilters, setShowFilters] = useState(false);
+  const [filterLanguage, setFilterLanguage] = useState('');
+  const [filterCountry, setFilterCountry] = useState('');
+  const [isEditingFilterCountry, setIsEditingFilterCountry] = useState(false);
+  const [filterCountryInput, setFilterCountryInput] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -39,7 +72,7 @@ export default function Home() {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
     }
-  }, [localStream]); // ref callback on the video element handles the "not mounted yet" case
+  }, [localStream]);
 
   // ─── Socket listeners ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -52,15 +85,22 @@ export default function Home() {
     const onPartnerLeft = () => {
       addMessage({ id: Date.now().toString(), sender: 'system', text: '— Partner disconnected —' });
     };
+    const onCountryDetected = (data: { country: string }) => {
+      if (data.country) {
+        setFilterCountry(data.country);
+      }
+    };
 
     socket.on('online_users', onOnlineUsers);
     socket.on('chat_message', onChatMessage);
     socket.on('partner_left', onPartnerLeft);
+    socket.on('country_detected', onCountryDetected);
 
     return () => {
       socket.off('online_users', onOnlineUsers);
       socket.off('chat_message', onChatMessage);
       socket.off('partner_left', onPartnerLeft);
+      socket.off('country_detected', onCountryDetected);
       socket.disconnect();
     };
   }, [addMessage]);
@@ -114,7 +154,13 @@ export default function Home() {
     }
     reset();
     setState('SEARCHING');
-    socket.emit('join_queue', { gender, interest, mode: chatMode });
+    socket.emit('join_queue', {
+      gender,
+      interest,
+      mode: chatMode,
+      language: filterLanguage,
+      country: filterCountry,
+    });
   };
 
   const handleSkip = () => {
@@ -122,7 +168,14 @@ export default function Home() {
     socket.emit('skip');
     reset();
     setState('SEARCHING');
-    socket.emit('join_queue', { gender, interest, mode: chatMode });
+    // Use current filter values when re-joining
+    socket.emit('join_queue', {
+      gender,
+      interest,
+      mode: chatMode,
+      language: filterLanguage,
+      country: filterCountry,
+    });
   };
 
   const handleStop = () => {
@@ -140,6 +193,17 @@ export default function Home() {
     socket.emit('chat_message', { text });
     addMessage({ id: Date.now().toString(), sender: 'me', text });
     setChatInput('');
+  };
+
+  // Helpers for country editing (in-chat filters)
+  const startEditFilterCountry = () => {
+    setFilterCountryInput(filterCountry);
+    setIsEditingFilterCountry(true);
+  };
+  const saveFilterCountry = () => {
+    const val = filterCountryInput.toUpperCase().trim().slice(0, 5);
+    setFilterCountry(val);
+    setIsEditingFilterCountry(false);
   };
 
   // ─── Render ─────────────────────────────────────────────────────────────────
@@ -229,6 +293,7 @@ export default function Home() {
                   <option value="ANY">Anyone</option>
                   <option value="MALE">Male</option>
                   <option value="FEMALE">Female</option>
+                  <option value="OTHER">Other</option>
                 </select>
               </div>
 
@@ -284,7 +349,7 @@ export default function Home() {
                       </p>
                     </div>
                   )}
-                  {/* Local PiP - use ref callback so srcObject is set the moment element mounts */}
+                  {/* Local PiP */}
                   <div className="absolute bottom-3 right-3 w-28 md:w-36 aspect-video bg-gray-900 rounded-xl overflow-hidden border-2 border-white/20 shadow-xl">
                     <video
                       ref={(el) => {
@@ -298,7 +363,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* Controls */}
+                {/* Video Controls */}
                 <div className="flex gap-3 shrink-0">
                   <button
                     onClick={handleSkip}
@@ -317,7 +382,8 @@ export default function Home() {
             )}
 
             {/* ── Chat Panel ── */}
-            <div className={`${chatMode === 'video' ? 'w-full lg:w-[360px]' : 'w-full max-w-2xl mx-auto'} flex flex-col min-h-0 bg-white/5 border border-white/10 rounded-2xl overflow-hidden backdrop-blur-xl`}>
+            <div className={`${chatMode === 'video' ? 'w-full lg:w-[380px]' : 'w-full max-w-2xl mx-auto'} flex flex-col min-h-0 bg-white/5 border border-white/10 rounded-2xl overflow-hidden backdrop-blur-xl`}
+              style={chatMode === 'text' ? { minHeight: 'calc(100vh - 120px)' } : {}}>
 
               {/* Chat header */}
               <div className="px-5 py-4 border-b border-white/10 flex items-center justify-between shrink-0">
@@ -327,17 +393,84 @@ export default function Home() {
                     {state === 'CONNECTED' ? 'Live Chat' : state === 'SEARCHING' ? 'Searching...' : 'Connecting...'}
                   </span>
                 </div>
-                {chatMode === 'text' && (
-                  <div className="flex gap-2">
-                    <button onClick={handleSkip} className="px-3 py-1.5 rounded-lg text-xs font-bold bg-white/5 hover:bg-white/10 border border-white/10 text-gray-400 hover:text-white transition-all">
-                      Next
-                    </button>
+                <div className="flex items-center gap-2">
+                  {/* Filter toggle button */}
+                  <button
+                    onClick={() => setShowFilters(f => !f)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${
+                      showFilters
+                        ? 'bg-violet-600/30 border-violet-500/50 text-violet-300'
+                        : 'bg-white/5 hover:bg-white/10 border border-white/10 text-gray-400 hover:text-white'
+                    }`}
+                    title="Match Filters"
+                  >
+                    🎛 Filters
+                  </button>
+                  {chatMode === 'text' && (
                     <button onClick={handleStop} className="px-3 py-1.5 rounded-lg text-xs font-bold bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 text-red-400 transition-all">
                       Stop
                     </button>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
+
+              {/* In-chat filter panel */}
+              {showFilters && (
+                <div className="px-5 py-4 border-b border-white/10 bg-black/20 space-y-3 shrink-0">
+                  <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-widest">Match Filters (applied on next match)</p>
+
+                  {/* Language filter */}
+                  <div>
+                    <label className="text-xs text-gray-400 mb-1 block">Language</label>
+                    <select
+                      value={filterLanguage}
+                      onChange={e => setFilterLanguage(e.target.value)}
+                      className="w-full bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-white text-sm outline-none focus:border-violet-500 transition-colors cursor-pointer appearance-none"
+                    >
+                      {LANGUAGES.map(l => (
+                        <option key={l.code} value={l.code}>{l.label}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Country filter */}
+                  <div>
+                    <label className="text-xs text-gray-400 mb-1 block">Country</label>
+                    {isEditingFilterCountry ? (
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={filterCountryInput}
+                          onChange={e => setFilterCountryInput(e.target.value.toUpperCase())}
+                          maxLength={5}
+                          placeholder="e.g. IN, US, GB"
+                          className="flex-1 bg-black/40 border border-violet-500/60 rounded-xl px-3 py-2 text-white outline-none text-sm"
+                        />
+                        <button
+                          onClick={saveFilterCountry}
+                          className="px-3 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold transition-all"
+                        >Save</button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-2 items-center bg-black/40 border border-white/10 rounded-xl px-3 py-2">
+                        <span className="flex-1 text-white text-sm">
+                          {filterCountry ? `🌍 ${filterCountry}` : 'Any country'}
+                        </span>
+                        <button
+                          onClick={startEditFilterCountry}
+                          className="text-xs text-violet-400 hover:text-violet-300 font-semibold transition-colors"
+                        >Change</button>
+                        {filterCountry && (
+                          <button
+                            onClick={() => setFilterCountry('')}
+                            className="text-xs text-gray-500 hover:text-gray-300 font-semibold transition-colors ml-1"
+                          >Any</button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Text-only search state */}
               {chatMode === 'text' && state === 'SEARCHING' && (
@@ -377,20 +510,32 @@ export default function Home() {
                 </div>
               )}
 
-              {/* Input */}
-              <form onSubmit={sendMessage} className="p-3 border-t border-white/10 flex gap-2 shrink-0">
+              {/* Input row — Next button on LEFT, send button on RIGHT */}
+              <form onSubmit={sendMessage} className="p-3 border-t border-white/10 flex gap-2 shrink-0 items-center">
+                {/* Next button — left of input */}
+                <button
+                  type="button"
+                  onClick={handleSkip}
+                  title="Next person"
+                  className="w-10 h-11 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-gray-300 hover:text-white transition-all shrink-0 flex items-center justify-center text-base"
+                >
+                  ⏭
+                </button>
+
                 <input
                   type="text"
                   value={chatInput}
                   onChange={e => setChatInput(e.target.value)}
                   placeholder={state === 'CONNECTED' ? 'Type a message...' : 'Waiting for match...'}
                   disabled={state !== 'CONNECTED'}
-                  className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2.5 text-sm text-white placeholder-gray-600 outline-none focus:border-violet-500/60 disabled:opacity-40 transition-colors"
+                  className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder-gray-600 outline-none focus:border-violet-500/60 disabled:opacity-40 transition-colors"
                 />
+
+                {/* Send button */}
                 <button
                   type="submit"
                   disabled={!chatInput.trim() || state !== 'CONNECTED'}
-                  className="w-10 h-10 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:from-violet-500 hover:to-blue-500 transition-all shrink-0"
+                  className="w-10 h-11 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:from-violet-500 hover:to-blue-500 transition-all shrink-0"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />

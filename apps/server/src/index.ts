@@ -28,10 +28,12 @@ async function start() {
   // This prevents ghost matches where users are matched with disconnected socket IDs
   try {
     const keys = await redis.keys('queue:*');
+    const waitingKeys = await redis.keys('waiting_queue');
     const sessionKeys = await redis.keys('session_room:*');
     const roomKeys = await redis.keys('room:*');
     const queueKeyKeys = await redis.keys('queue_key:*');
-    const allStaleKeys = [...keys, ...sessionKeys, ...roomKeys, ...queueKeyKeys];
+    const metaKeys = await redis.keys('meta:*');
+    const allStaleKeys = [...keys, ...waitingKeys, ...sessionKeys, ...roomKeys, ...queueKeyKeys, ...metaKeys];
     if (allStaleKeys.length > 0) {
       await redis.del(...allStaleKeys);
       logger.info(`🧹 Cleared ${allStaleKeys.length} stale Redis keys from previous session`);
