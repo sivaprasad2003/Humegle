@@ -17,7 +17,7 @@ const SignalSchema = z.object({
 
 export function setupSocketHandlers(io: Server) {
   const broadcastOnlineCount = () => {
-    io.emit('online_users', io.engine.clientsCount);
+    io.emit('online_users', io.sockets.sockets.size);
   };
 
   io.on('connection', (socket: Socket) => {

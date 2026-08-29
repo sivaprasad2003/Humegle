@@ -39,7 +39,7 @@ export default function Home() {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
     }
-  }, [localStream]);
+  }, [localStream]); // ref callback on the video element handles the "not mounted yet" case
 
   // ─── Socket listeners ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -284,9 +284,16 @@ export default function Home() {
                       </p>
                     </div>
                   )}
-                  {/* Local PiP */}
+                  {/* Local PiP - use ref callback so srcObject is set the moment element mounts */}
                   <div className="absolute bottom-3 right-3 w-28 md:w-36 aspect-video bg-gray-900 rounded-xl overflow-hidden border-2 border-white/20 shadow-xl">
-                    <video ref={localVideoRef} autoPlay playsInline muted className="w-full h-full object-cover scale-x-[-1]" />
+                    <video
+                      ref={(el) => {
+                        (localVideoRef as React.MutableRefObject<HTMLVideoElement | null>).current = el;
+                        if (el && localStream) el.srcObject = localStream;
+                      }}
+                      autoPlay playsInline muted
+                      className="w-full h-full object-cover scale-x-[-1]"
+                    />
                     <span className="absolute bottom-1 left-2 text-[10px] text-white/60 font-medium">You</span>
                   </div>
                 </div>
@@ -385,8 +392,8 @@ export default function Home() {
                   disabled={!chatInput.trim() || state !== 'CONNECTED'}
                   className="w-10 h-10 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed hover:from-violet-500 hover:to-blue-500 transition-all shrink-0"
                 >
-                  <svg className="w-4 h-4 rotate-45" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z" />
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
                   </svg>
                 </button>
               </form>
